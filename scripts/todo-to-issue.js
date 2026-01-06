@@ -168,13 +168,14 @@ async function addIssueToProject(issueNodeId, projectNumber) {
       variables: { owner, number: projectNumber }
     });
 
+    console.log('User project response:', JSON.stringify(projectData, null, 2));
     const projectId = projectData.data?.user?.projectV2?.id;
     if (projectId) {
-      console.log('Found user project');
+      console.log('Found user project:', projectId);
       return await addItemToProject(projectId, issueNodeId);
     }
   } catch (error) {
-    console.log('User project not found, trying organization...');
+    console.log('User project lookup error:', error.message);
   }
   
   // Try as organization
@@ -194,15 +195,18 @@ async function addIssueToProject(issueNodeId, projectNumber) {
       variables: { owner, number: projectNumber }
     });
     
+    console.log('Organization project response:', JSON.stringify(orgProjectData, null, 2));
     const orgProjectId = orgProjectData.data?.organization?.projectV2?.id;
     if (orgProjectId) {
-      console.log('Found organization project');
+      console.log('Found organization project:', orgProjectId);
       return await addItemToProject(orgProjectId, issueNodeId);
     }
   } catch (error) {
-    console.error('Organization project not found');
+    console.error('Organization project lookup error:', error.message);
   }
   
+  console.warn(`\nNote: Make sure the GitHub token has 'project' scope enabled.`);
+  console.warn(`Project URL should be: https://github.com/users/${owner}/projects/${projectNumber}`);
   throw new Error(`Could not find project #${projectNumber} for owner "${owner}"`);
 }
 
@@ -285,7 +289,15 @@ function extractTodos(filePath, baseDir) {
       const match = line.match(todoRegex);
       
       if (match) {
-        const todoText = match[1].trim();
+        let todoText = match[1].trim();
+        // Remove trailing comment closers if any
+        todoText = todoText.replace(/-->\s*$/, '').replace(/\*\/\s*$/, '').trim();
+        
+        // Skip if the TODO text is just describing the regex pattern
+        if (todoText.length === 0 || todoText.includes('Supports:')) {
+          continue;
+        }
+        
         todos.push({
           text: todoText,
           filePath: relativePath,
