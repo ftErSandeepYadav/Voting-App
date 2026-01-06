@@ -14,6 +14,7 @@ class DataProcessor {
     process() {
         // TODO: Implement batch processing for large datasets
         console.log("Processing data...");
+        // TODO: create a codeforces submission scraper
     }
 }
 
