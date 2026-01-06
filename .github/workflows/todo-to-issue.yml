@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   issues: write
+  projects: write
 
 jobs:
   create-issues-from-todos:
@@ -24,7 +25,7 @@ jobs:
           
       - name: Scan TODOs and create issues
         env:
-          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PROJECT_NUMBER: 2
         run: node scripts/todo-to-issue.js
