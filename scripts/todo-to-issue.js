@@ -293,8 +293,14 @@ function extractTodos(filePath, baseDir) {
         // Remove trailing comment closers if any
         todoText = todoText.replace(/-->\s*$/, '').replace(/\*\/\s*$/, '').trim();
         
-        // Skip if the TODO text is just describing the regex pattern
-        if (todoText.length === 0 || todoText.includes('Supports:')) {
+        // Skip if the TODO text is documentation or examples
+        if (todoText.length === 0 || 
+            todoText.includes('Supports:') ||
+            todoText.includes('// TODO:') ||
+            todoText.includes('# TODO:') ||
+            todoText.includes('<!-- TODO:') ||
+            todoText.includes('/* TODO:') ||
+            todoText.startsWith(',')) {
           continue;
         }
         
@@ -347,17 +353,24 @@ async function main() {
   
   // Create issues for new TODOs
   let createdCount = 0;
+  let addedToProjectCount = 0;
+  
   for (const todo of allTodos) {
     if (!existingFingerprints.has(todo.fingerprint)) {
       try {
         const issue = await createIssue(todo.text, todo.filePath, todo.fingerprint);
-        
-        // Add to project
-        if (issue.node_id) {
-          await addIssueToProject(issue.node_id, PROJECT_NUMBER);
-        }
-        
         createdCount++;
+        
+        // Try to add to project (non-fatal if it fails)
+        if (issue.node_id && PROJECT_NUMBER) {
+          try {
+            await addIssueToProject(issue.node_id, PROJECT_NUMBER);
+            addedToProjectCount++;
+          } catch (projectError) {
+            console.warn(`Warning: Could not add issue to project: ${projectError.message}`);
+            console.warn('Issue created successfully but not added to project.\n');
+          }
+        }
         
         // Rate limiting: wait a bit between requests
         await new Promise(resolve => setTimeout(resolve, 1000));
@@ -372,7 +385,17 @@ async function main() {
   console.log(`\n=== Summary ===`);
   console.log(`Total TODOs found: ${allTodos.length}`);
   console.log(`New issues created: ${createdCount}`);
+  console.log(`Added to project: ${addedToProjectCount}`);
   console.log(`Skipped (already exist): ${allTodos.length - createdCount}`);
+  
+  if (createdCount > 0 && addedToProjectCount === 0) {
+    console.log(`\n⚠️  Note: Issues were created but not added to the project.`);
+    console.log(`This might be because:`);
+    console.log(`  - The project is a "Projects (classic)" not "Projects (beta/v2)"`);
+    console.log(`  - The project number is incorrect`);
+    console.log(`  - The GitHub token needs 'project' scope`);
+    console.log(`  - Project URL: https://github.com/users/${GITHUB_REPOSITORY.split('/')[0]}/projects/${PROJECT_NUMBER}`);
+  }
 }
 
 // Run the script
