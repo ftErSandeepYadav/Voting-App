@@ -161,42 +161,49 @@ async function addIssueToProject(issueNodeId, projectNumber) {
   };
 
   console.log(`Fetching project ID for project number ${projectNumber}...`);
-  const projectData = await makeRequest(projectOptions, {
-    query: projectQuery,
-    variables: { owner, number: projectNumber }
-  });
+  
+  try {
+    const projectData = await makeRequest(projectOptions, {
+      query: projectQuery,
+      variables: { owner, number: projectNumber }
+    });
 
-  const projectId = projectData.data?.user?.projectV2?.id;
-  if (!projectId) {
-    console.error('Could not find project. Trying organization instead of user...');
-    
-    // Try as organization
-    const orgProjectQuery = `
-      query($owner: String!, $number: Int!) {
-        organization(login: $owner) {
-          projectV2(number: $number) {
-            id
-          }
+    const projectId = projectData.data?.user?.projectV2?.id;
+    if (projectId) {
+      console.log('Found user project');
+      return await addItemToProject(projectId, issueNodeId);
+    }
+  } catch (error) {
+    console.log('User project not found, trying organization...');
+  }
+  
+  // Try as organization
+  const orgProjectQuery = `
+    query($owner: String!, $number: Int!) {
+      organization(login: $owner) {
+        projectV2(number: $number) {
+          id
         }
       }
-    `;
-    
+    }
+  `;
+  
+  try {
     const orgProjectData = await makeRequest(projectOptions, {
       query: orgProjectQuery,
       variables: { owner, number: projectNumber }
     });
     
     const orgProjectId = orgProjectData.data?.organization?.projectV2?.id;
-    if (!orgProjectId) {
-      throw new Error('Could not find project ID');
+    if (orgProjectId) {
+      console.log('Found organization project');
+      return await addItemToProject(orgProjectId, issueNodeId);
     }
-    
-    // Add issue to project
-    return await addItemToProject(orgProjectId, issueNodeId);
+  } catch (error) {
+    console.error('Organization project not found');
   }
-
-  // Add issue to project
-  return await addItemToProject(projectId, issueNodeId);
+  
+  throw new Error(`Could not find project #${projectNumber} for owner "${owner}"`);
 }
 
 /**
@@ -271,7 +278,7 @@ function extractTodos(filePath, baseDir) {
     
     // Match TODO: comments in various formats
     // Supports: // TODO:, # TODO:, <!-- TODO: -->, /* TODO: */, etc.
-    const todoRegex = /(?:\/\/|#|<!--|\/\*)\s*TODO:\s*(.+?)(?:-->|\*\/)?$/i;
+    const todoRegex = /(?:\/\/|#|<!--|\/\*)\s*TODO:\s*(.+?)(?=-->|\*\/|$)/i;
     
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
