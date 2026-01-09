@@ -21,3 +21,6 @@ class DataProcessor {
 /* TODO: Add unit tests for all functions */
 
 export { processData, DataProcessor };
+
+
+// TODO: Refactor code to improve readability
