@@ -1,10 +1,13 @@
 name: TODO to GitHub Issues
 
+# Trigger on pushes to main branch
+# This includes direct commits and merged PRs
 on:
   push:
     branches:
       - main
 
+# Explicitly set permissions for GITHUB_TOKEN
 permissions:
   contents: read
   issues: write
@@ -12,19 +15,31 @@ permissions:
 jobs:
   create-issues-from-todos:
     runs-on: ubuntu-latest
-    
+
     steps:
+      # Step 1: Check out the repository
       - name: Checkout repository
         uses: actions/checkout@v4
-        
-      - name: Set up Node.js
+        with:
+          fetch-depth: 1 # Shallow clone for faster checkout
+
+      # Step 2: Set up Node.js
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          
-      - name: Scan TODOs and create issues
+          node-version: "20"
+          cache: "npm"
+
+      # Step 3: Install dependencies for the script
+      - name: Install dependencies
+        run: npm install @octokit/rest@20.1.1
+
+      # Step 4: Run the TODO detection and issue creation script
+      - name: Scan for TODOs and create issues
         env:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          PROJECT_NUMBER: 2
-        run: node scripts/todo-to-issue.js
+          PROJECT_NUMBER: 2 # GitHub Project v2 number
+        run: |
+          node scripts/todo-to-issue.js
+

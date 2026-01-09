@@ -1,185 +1,206 @@
 #!/usr/bin/env node
 
 /**
- * TODO to GitHub Issue Automation
- * 
- * This script scans the repository for TODO comments, creates GitHub Issues
- * for new TODOs, and adds them to a GitHub Project v2.
+ * TODO to GitHub Issues CI Bot
+ *
+ * This script scans the repository for TODO comments, creates unique fingerprints,
+ * and generates GitHub Issues for new TODOs while avoiding duplicates.
+ * It also adds created issues to a GitHub Project (v2).
  */
 
 const fs = require('fs');
 const path = require('path');
-const https = require('https');
+const { Octokit } = require('@octokit/rest');
 
-// Configuration from environment variables
+// Configuration
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
-const PROJECT_NUMBER = parseInt(process.env.PROJECT_NUMBER || '15', 10);
+const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY; // format: owner/repo
+const PROJECT_NUMBER = parseInt(process.env.PROJECT_NUMBER || '0', 10); // GitHub Project v2 number
 
 // Directories to exclude from scanning
 const EXCLUDED_DIRS = [
   '.git',
-  'node_modules',
-  'vendor',
-  'build',
-  'dist',
-  'out',
-  'coverage',
-  '.next',
-  '.idea',
-  '.vscode'
+  '.github', // GitHub workflows and configs (our own automation)
+  '.circleci', // CI/CD configs
+  '.cursor', // Cursor IDE configs
+  '.vscode', // VS Code configs
+  '.idea', // IntelliJ configs
+  '.wrangler', // Cloudflare Wrangler cache
+  'node_modules', // Node.js dependencies
+  'vendor', // Go dependencies
+  'build', // Build outputs
+  'dist', // Distribution outputs
+  'out', // Output directories
+  'coverage', // Test coverage reports
+  '.next', // Next.js build cache
+  'bin', // Binary executables
+  'git_hooks', // Git hooks (not source code)
+  'infra', // Infrastructure configs (could have TODO in comments but typically ops-level)
 ];
 
+// Issue labels to add
+const ISSUE_LABELS = ['engineering', 'todo'];
+
+// Initialize Octokit
+const octokit = new Octokit({ auth: GITHUB_TOKEN });
+
 /**
- * Make an HTTPS request (wrapper for both REST and GraphQL)
+ * Recursively scan directory for TODO comments
+ * @param {string} dir - Directory to scan
+ * @param {string} rootDir - Root directory for relative path calculation
+ * @returns {Array} Array of TODO objects with file path and text
  */
-function makeRequest(options, data = null) {
-  return new Promise((resolve, reject) => {
-    const req = https.request(options, (res) => {
-      let body = '';
-      res.on('data', (chunk) => body += chunk);
-      res.on('end', () => {
-        try {
-          const parsed = JSON.parse(body);
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(parsed);
-          } else {
-            reject(new Error(`HTTP ${res.statusCode}: ${JSON.stringify(parsed)}`));
-          }
-        } catch (e) {
-          reject(new Error(`Failed to parse response: ${body}`));
+function scanForTodos(dir, rootDir) {
+  const todos = [];
+
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+
+      if (entry.isDirectory()) {
+        // Skip excluded directories
+        if (EXCLUDED_DIRS.includes(entry.name)) {
+          continue;
         }
-      });
-    });
+        // Recursively scan subdirectories
+        todos.push(...scanForTodos(fullPath, rootDir));
+      } else if (entry.isFile()) {
+        // Read file and search for TODO comments
+        try {
+          const content = fs.readFileSync(fullPath, 'utf8');
+          const lines = content.split('\n');
 
-    req.on('error', reject);
-    
-    if (data) {
-      req.write(typeof data === 'string' ? data : JSON.stringify(data));
-    }
-    
-    req.end();
-  });
-}
+          lines.forEach((line, index) => {
+            // Match TODO: pattern (case-sensitive)
+            const todoMatch = line.match(/TODO:\s*(.+)/);
+            if (todoMatch) {
+              const todoText = todoMatch[1].trim();
+              const relativePath = path.relative(rootDir, fullPath);
 
-/**
- * Fetch all open issues with 'todo' label using REST API
- */
-async function fetchExistingTodoIssues() {
-  const [owner, repo] = GITHUB_REPOSITORY.split('/');
-  const options = {
-    hostname: 'api.github.com',
-    path: `/repos/${owner}/${repo}/issues?labels=todo&state=open&per_page=100`,
-    method: 'GET',
-    headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
-      'User-Agent': 'TODO-to-Issue-Bot',
-      'Accept': 'application/vnd.github.v3+json'
-    }
-  };
-
-  console.log('Fetching existing TODO issues...');
-  const issues = await makeRequest(options);
-  
-  // Extract fingerprints from existing issues
-  const fingerprints = new Set();
-  for (const issue of issues) {
-    const match = issue.body?.match(/fingerprint=(.+)/);
-    if (match) {
-      fingerprints.add(match[1].trim());
-    }
-  }
-  
-  console.log(`Found ${fingerprints.size} existing TODO issues`);
-  return fingerprints;
-}
-
-/**
- * Create a new GitHub Issue using REST API
- */
-async function createIssue(todoText, filePath, fingerprint) {
-  const [owner, repo] = GITHUB_REPOSITORY.split('/');
-  
-  const issueBody = `**File:** \`${filePath}\`
-
----
-**CI_METADATA**
-fingerprint=${fingerprint}
-`;
-
-  const issueData = {
-    title: `TODO: ${todoText}`,
-    body: issueBody,
-    labels: ['engineering', 'todo']
-  };
-
-  const options = {
-    hostname: 'api.github.com',
-    path: `/repos/${owner}/${repo}/issues`,
-    method: 'POST',
-    headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
-      'User-Agent': 'TODO-to-Issue-Bot',
-      'Accept': 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json'
-    }
-  };
-
-  console.log(`Creating issue: TODO: ${todoText}`);
-  const issue = await makeRequest(options, issueData);
-  console.log(`Created issue #${issue.number}`);
-  
-  return issue;
-}
-
-/**
- * Add issue to GitHub Project v2 using GraphQL API
- */
-async function addIssueToProject(issueNodeId, projectNumber) {
-  const [owner] = GITHUB_REPOSITORY.split('/');
-  
-  // First, get the project ID
-  const projectQuery = `
-    query($owner: String!, $number: Int!) {
-      user(login: $owner) {
-        projectV2(number: $number) {
-          id
+              todos.push({
+                filePath: relativePath,
+                text: todoText,
+                lineNumber: index + 1, // For reference, though not required
+              });
+            }
+          });
+        } catch (error) {
+          // Skip files that can't be read (binary, permissions, etc.)
+          if (error.code !== 'EISDIR') {
+            console.warn(
+              `Warning: Could not read file ${fullPath}: ${error.message}`
+            );
+          }
         }
       }
     }
-  `;
+  } catch (error) {
+    console.error(`Error scanning directory ${dir}: ${error.message}`);
+  }
 
-  const projectOptions = {
-    hostname: 'api.github.com',
-    path: '/graphql',
-    method: 'POST',
-    headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
-      'User-Agent': 'TODO-to-Issue-Bot',
-      'Content-Type': 'application/json'
-    }
-  };
+  return todos;
+}
 
-  console.log(`Fetching project ID for project number ${projectNumber}...`);
-  
+/**
+ * Generate fingerprint for a TODO
+ * @param {string} filePath - File path
+ * @param {string} todoText - TODO text
+ * @returns {string} Fingerprint
+ */
+function generateFingerprint(filePath, todoText) {
+  return `${filePath}|${todoText}`;
+}
+
+/**
+ * Fetch all existing TODO issues from GitHub
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @returns {Array} Array of existing fingerprints
+ */
+async function fetchExistingTodoIssues(owner, repo) {
+  const existingFingerprints = new Set();
+
   try {
-    const projectData = await makeRequest(projectOptions, {
-      query: projectQuery,
-      variables: { owner, number: projectNumber }
-    });
+    // Fetch all open issues with 'todo' label
+    const iterator = octokit.paginate.iterator(
+      octokit.rest.issues.listForRepo,
+      {
+        owner,
+        repo,
+        labels: 'todo',
+        state: 'open',
+        per_page: 100,
+      }
+    );
 
-    console.log('User project response:', JSON.stringify(projectData, null, 2));
-    const projectId = projectData.data?.user?.projectV2?.id;
-    if (projectId) {
-      console.log('Found user project:', projectId);
-      return await addItemToProject(projectId, issueNodeId);
+    for await (const response of iterator) {
+      for (const issue of response.data) {
+        // Parse fingerprint from issue body
+        const fingerprintMatch = issue.body?.match(/fingerprint=(.+)/);
+        if (fingerprintMatch) {
+          existingFingerprints.add(fingerprintMatch[1].trim());
+        }
+      }
     }
   } catch (error) {
-    console.log('User project lookup error:', error.message);
+    console.error(`Error fetching existing issues: ${error.message}`);
+    throw error;
   }
-  
-  // Try as organization
-  const orgProjectQuery = `
+
+  return existingFingerprints;
+}
+
+/**
+ * Create a GitHub issue for a TODO
+ * @param {string} owner - Repository owner
+ * @param {string} repo - Repository name
+ * @param {object} todo - TODO object
+ * @param {string} fingerprint - TODO fingerprint
+ * @returns {object} Created issue
+ */
+async function createIssue(owner, repo, todo, fingerprint) {
+  const title = `TODO: ${todo.text}`;
+  const body = `**File:** \`${todo.filePath}\`
+
+**TODO:**
+${todo.text}
+
+---
+**CI_METADATA**
+\`\`\`
+fingerprint=${fingerprint}
+\`\`\`
+`;
+
+  try {
+    const response = await octokit.rest.issues.create({
+      owner,
+      repo,
+      title,
+      body,
+      labels: ISSUE_LABELS,
+    });
+
+    console.log(`✓ Created issue #${response.data.number}: ${title}`);
+    return response.data;
+  } catch (error) {
+    console.error(
+      `Error creating issue for TODO "${todo.text}": ${error.message}`
+    );
+    throw error;
+  }
+}
+
+/**
+ * Get the GitHub Project v2 ID using GraphQL
+ * @param {string} owner - Repository owner (organization)
+ * @param {number} projectNumber - Project number
+ * @returns {string} Project ID
+ */
+async function getProjectId(owner, projectNumber) {
+  const query = `
     query($owner: String!, $number: Int!) {
       organization(login: $owner) {
         projectV2(number: $number) {
@@ -188,35 +209,32 @@ async function addIssueToProject(issueNodeId, projectNumber) {
       }
     }
   `;
-  
+
   try {
-    const orgProjectData = await makeRequest(projectOptions, {
-      query: orgProjectQuery,
-      variables: { owner, number: projectNumber }
+    const response = await octokit.graphql(query, {
+      owner,
+      number: projectNumber,
     });
-    
-    console.log('Organization project response:', JSON.stringify(orgProjectData, null, 2));
-    const orgProjectId = orgProjectData.data?.organization?.projectV2?.id;
-    if (orgProjectId) {
-      console.log('Found organization project:', orgProjectId);
-      return await addItemToProject(orgProjectId, issueNodeId);
-    }
+
+    return response.organization.projectV2.id;
   } catch (error) {
-    console.error('Organization project lookup error:', error.message);
+    console.error(`Error fetching project ID: ${error.message}`);
+    throw error;
   }
-  
-  console.warn(`\nNote: Make sure the GitHub token has 'project' scope enabled.`);
-  console.warn(`Project URL should be: https://github.com/users/${owner}/projects/${projectNumber}`);
-  throw new Error(`Could not find project #${projectNumber} for owner "${owner}"`);
 }
 
 /**
- * Helper function to add item to project
+ * Add issue to GitHub Project v2
+ * @param {string} projectId - Project ID
+ * @param {string} issueNodeId - Issue node ID
  */
-async function addItemToProject(projectId, issueNodeId) {
+async function addIssueToProject(projectId, issueNodeId) {
   const mutation = `
     mutation($projectId: ID!, $contentId: ID!) {
-      addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+      addProjectV2ItemById(input: {
+        projectId: $projectId
+        contentId: $contentId
+      }) {
         item {
           id
         }
@@ -224,178 +242,105 @@ async function addItemToProject(projectId, issueNodeId) {
     }
   `;
 
-  const options = {
-    hostname: 'api.github.com',
-    path: '/graphql',
-    method: 'POST',
-    headers: {
-      'Authorization': `token ${GITHUB_TOKEN}`,
-      'User-Agent': 'TODO-to-Issue-Bot',
-      'Content-Type': 'application/json'
-    }
-  };
-
-  console.log('Adding issue to project...');
-  const result = await makeRequest(options, {
-    query: mutation,
-    variables: { projectId, contentId: issueNodeId }
-  });
-
-  if (result.data?.addProjectV2ItemById?.item?.id) {
-    console.log('Successfully added issue to project');
-  }
-  
-  return result;
-}
-
-/**
- * Recursively scan directory for files
- */
-function* scanDirectory(dir, baseDir = dir) {
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  
-  for (const entry of entries) {
-    const fullPath = path.join(dir, entry.name);
-    
-    if (entry.isDirectory()) {
-      // Skip excluded directories
-      if (EXCLUDED_DIRS.includes(entry.name)) {
-        continue;
-      }
-      yield* scanDirectory(fullPath, baseDir);
-    } else if (entry.isFile()) {
-      yield fullPath;
-    }
-  }
-}
-
-/**
- * Extract TODO comments from a file
- */
-function extractTodos(filePath, baseDir) {
-  const todos = [];
-  
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    const lines = content.split('\n');
-    const relativePath = path.relative(baseDir, filePath);
-    
-    // Match TODO: comments in various formats
-    // Supports: // TODO:, # TODO:, <!-- TODO: -->, /* TODO: */, etc.
-    const todoRegex = /(?:\/\/|#|<!--|\/\*)\s*TODO:\s*(.+?)(?=-->|\*\/|$)/i;
-    
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const match = line.match(todoRegex);
-      
-      if (match) {
-        let todoText = match[1].trim();
-        // Remove trailing comment closers if any
-        todoText = todoText.replace(/-->\s*$/, '').replace(/\*\/\s*$/, '').trim();
-        
-        // Skip if the TODO text is documentation or examples
-        if (todoText.length === 0 || 
-            todoText.includes('Supports:') ||
-            todoText.includes('// TODO:') ||
-            todoText.includes('# TODO:') ||
-            todoText.includes('<!-- TODO:') ||
-            todoText.includes('/* TODO:') ||
-            todoText.startsWith(',')) {
-          continue;
-        }
-        
-        todos.push({
-          text: todoText,
-          filePath: relativePath,
-          fingerprint: `${relativePath}|${todoText}`
-        });
-      }
-    }
+    await octokit.graphql(mutation, {
+      projectId,
+      contentId: issueNodeId,
+    });
+
+    console.log(`  ✓ Added to project #${PROJECT_NUMBER}`);
   } catch (error) {
-    // Skip files that can't be read (binary files, permission issues, etc.)
-    if (error.code !== 'EISDIR') {
-      console.warn(`Warning: Could not read ${filePath}: ${error.message}`);
-    }
+    console.error(`Error adding issue to project: ${error.message}`);
+    // Don't throw - issue was created successfully, project addition is secondary
   }
-  
-  return todos;
 }
 
 /**
- * Main execution
+ * Main execution function
  */
 async function main() {
-  console.log('=== TODO to GitHub Issue Automation ===\n');
-  
-  // Validate environment
-  if (!GITHUB_TOKEN || !GITHUB_REPOSITORY) {
-    console.error('Error: GITHUB_TOKEN and GITHUB_REPOSITORY must be set');
+  console.log('🔍 TODO to GitHub Issues CI Bot');
+  console.log('================================\n');
+
+  // Validate environment variables
+  if (!GITHUB_TOKEN) {
+    console.error('Error: GITHUB_TOKEN environment variable is required');
     process.exit(1);
   }
-  
-  console.log(`Repository: ${GITHUB_REPOSITORY}`);
-  console.log(`Project Number: ${PROJECT_NUMBER}\n`);
-  
-  // Fetch existing TODO issues
-  const existingFingerprints = await fetchExistingTodoIssues();
-  
-  // Scan repository for TODOs
-  console.log('\nScanning repository for TODO comments...');
-  const baseDir = process.cwd();
-  const allTodos = [];
-  
-  for (const filePath of scanDirectory(baseDir)) {
-    const todos = extractTodos(filePath, baseDir);
-    allTodos.push(...todos);
+
+  if (!GITHUB_REPOSITORY) {
+    console.error('Error: GITHUB_REPOSITORY environment variable is required');
+    process.exit(1);
   }
-  
-  console.log(`Found ${allTodos.length} TODO comments in total\n`);
-  
-  // Create issues for new TODOs
+
+  const [owner, repo] = GITHUB_REPOSITORY.split('/');
+
+  // Get repository root (current working directory)
+  const rootDir = process.cwd();
+  console.log(`Scanning repository: ${rootDir}\n`);
+
+  // Step 1: Scan for TODOs
+  console.log('Step 1: Scanning for TODO comments...');
+  const todos = scanForTodos(rootDir, rootDir);
+  console.log(`Found ${todos.length} TODO(s)\n`);
+
+  if (todos.length === 0) {
+    console.log('No TODOs found. Exiting.');
+    return;
+  }
+
+  // Step 2: Fetch existing TODO issues
+  console.log('Step 2: Fetching existing TODO issues from GitHub...');
+  const existingFingerprints = await fetchExistingTodoIssues(owner, repo);
+  console.log(`Found ${existingFingerprints.size} existing TODO issue(s)\n`);
+
+  // Step 3: Filter new TODOs
+  console.log('Step 3: Identifying new TODOs...');
+  const newTodos = todos.filter(todo => {
+    const fingerprint = generateFingerprint(todo.filePath, todo.text);
+    return !existingFingerprints.has(fingerprint);
+  });
+  console.log(`Found ${newTodos.length} new TODO(s) to create\n`);
+
+  if (newTodos.length === 0) {
+    console.log('No new TODOs to create. Exiting.');
+    return;
+  }
+
+  // Step 4: Get Project ID
+  console.log('Step 4: Fetching GitHub Project information...');
+  let projectId;
+  try {
+    projectId = await getProjectId(owner, PROJECT_NUMBER);
+    console.log(`Project ID: ${projectId}\n`);
+  } catch (error) {
+    console.warn(
+      'Warning: Could not fetch project ID. Issues will be created but not added to project.\n'
+    );
+  }
+
+  // Step 5: Create issues
+  console.log('Step 5: Creating GitHub issues...');
   let createdCount = 0;
-  let addedToProjectCount = 0;
-  
-  for (const todo of allTodos) {
-    if (!existingFingerprints.has(todo.fingerprint)) {
-      try {
-        const issue = await createIssue(todo.text, todo.filePath, todo.fingerprint);
-        createdCount++;
-        
-        // Try to add to project (non-fatal if it fails)
-        if (issue.node_id && PROJECT_NUMBER) {
-          try {
-            await addIssueToProject(issue.node_id, PROJECT_NUMBER);
-            addedToProjectCount++;
-          } catch (projectError) {
-            console.warn(`Warning: Could not add issue to project: ${projectError.message}`);
-            console.warn('Issue created successfully but not added to project.\n');
-          }
-        }
-        
-        // Rate limiting: wait a bit between requests
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      } catch (error) {
-        console.error(`Error creating issue for "${todo.text}": ${error.message}`);
+
+  for (const todo of newTodos) {
+    const fingerprint = generateFingerprint(todo.filePath, todo.text);
+
+    try {
+      const issue = await createIssue(owner, repo, todo, fingerprint);
+
+      // Add to project if we have a project ID
+      if (projectId && issue.node_id) {
+        await addIssueToProject(projectId, issue.node_id);
       }
-    } else {
-      console.log(`Skipping duplicate: ${todo.text}`);
+
+      createdCount++;
+    } catch (error) {
+      console.error(`Failed to process TODO: ${todo.text}`);
     }
   }
-  
-  console.log(`\n=== Summary ===`);
-  console.log(`Total TODOs found: ${allTodos.length}`);
-  console.log(`New issues created: ${createdCount}`);
-  console.log(`Added to project: ${addedToProjectCount}`);
-  console.log(`Skipped (already exist): ${allTodos.length - createdCount}`);
-  
-  if (createdCount > 0 && addedToProjectCount === 0) {
-    console.log(`\n⚠️  Note: Issues were created but not added to the project.`);
-    console.log(`This might be because:`);
-    console.log(`  - The project is a "Projects (classic)" not "Projects (beta/v2)"`);
-    console.log(`  - The project number is incorrect`);
-    console.log(`  - The GitHub token needs 'project' scope`);
-    console.log(`  - Project URL: https://github.com/users/${GITHUB_REPOSITORY.split('/')[0]}/projects/${PROJECT_NUMBER}`);
-  }
+
+  console.log(`\n✅ Complete! Created ${createdCount} new issue(s)`);
 }
 
 // Run the script
