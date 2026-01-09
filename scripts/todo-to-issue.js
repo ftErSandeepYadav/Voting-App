@@ -201,8 +201,8 @@ fingerprint=${fingerprint}
  */
 async function getProjectId(owner, projectNumber) {
   const query = `
-    query($owner: String!, $number: Int!) {
-      organization(login: $owner) {
+    query($number: Int!) {
+      viewer{
         projectV2(number: $number) {
           id
         }
@@ -212,11 +212,10 @@ async function getProjectId(owner, projectNumber) {
 
   try {
     const response = await octokit.graphql(query, {
-      owner,
       number: projectNumber,
     });
 
-    return response.organization.projectV2.id;
+    return response.viewer.projectV2.id;
   } catch (error) {
     console.error(`Error fetching project ID: ${error.message}`);
     throw error;
